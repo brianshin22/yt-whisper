@@ -7,6 +7,7 @@ import yt_dlp
 from .utils import slugify, str2bool, write_srt, write_vtt
 import tempfile
 
+from openai import OpenAI
 
 def main():
     parser = argparse.ArgumentParser(
@@ -28,11 +29,15 @@ def main():
 
     parser.add_argument("--break-lines", type=int, default=0, 
                         help="Whether to break lines into a bottom-heavy pyramid shape if line length exceeds N characters. 0 disables line breaking.")
+    
+    parser.add_argument("--online", "-n", type=str2bool, default=False,
+                        help="Whether to use OpenAI API instead of local model. Default is False. If True, make sure OPENAI_API_KEY environment variable is set with your OpenAI API key.")
 
     args = parser.parse_args().__dict__
     model_name: str = args.pop("model")
     output_dir: str = args.pop("output_dir")
     subtitles_format: str = args.pop("format")
+    use_openai_api: bool = args.pop("online")
     os.makedirs(output_dir, exist_ok=True)
 
     if model_name.endswith(".en"):
@@ -40,25 +45,47 @@ def main():
             f"{model_name} is an English-only model, forcing English detection.")
         args["language"] = "en"
 
-    model = whisper.load_model(model_name)
+    if use_openai_api:
+        print("Using OpenAI API.")
+        client = OpenAI()
+    else:
+        print("Using local model.")
+        model = whisper.load_model(model_name)
+
     audios = get_audio(args.pop("video"))
     break_lines = args.pop("break_lines")
 
     for title, audio_path in audios.items():
         warnings.filterwarnings("ignore")
-        result = model.transcribe(audio_path, **args)
+        if use_openai_api:
+            file = open(audio_path, "rb")
+            result = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=file,
+                response_format="verbose_json",
+                timestamp_granularities=["segment"]
+            )
+            file.close()
+            result_segments = result.segments
+            result_text = result.text
+        else:
+            result = model.transcribe(audio_path, **args)
+            result_segments = result["segments"]
+            result_text = result["text"]
+        
+        print("Text:\n" + result_text)
         warnings.filterwarnings("default")
 
         if (subtitles_format == 'vtt'):
             vtt_path = os.path.join(output_dir, f"{slugify(title)}.vtt")
             with open(vtt_path, 'w', encoding="utf-8") as vtt:
-                write_vtt(result["segments"], file=vtt, line_length=break_lines)
+                write_vtt(result_segments, file=vtt, line_length=break_lines)
 
             print("Saved VTT to", os.path.abspath(vtt_path))
         else:
             srt_path = os.path.join(output_dir, f"{slugify(title)}.srt")
             with open(srt_path, 'w', encoding="utf-8") as srt:
-                write_srt(result["segments"], file=srt, line_length=break_lines)
+                write_srt(result_segments, file=srt, line_length=break_lines)
 
             print("Saved SRT to", os.path.abspath(srt_path))
 
